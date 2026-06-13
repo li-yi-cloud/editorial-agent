@@ -1,0 +1,10 @@
+langchain
+langchain-community
+langchain-ollama
+python-docx
+chromadb
+websockets
+jinja2
+fastapi
+uvicorn
+python-multipart

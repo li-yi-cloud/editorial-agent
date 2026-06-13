@@ -1,0 +1,11 @@
+venv/
+__pycache__/
+*.pyc
+.DS_Store
+chroma_db/
+temp_*.docx
+reviewed_*.docx
+node_modules/
+package-lock.json
+.pytest_cache/
+.vitest_cache/

@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Document Reviewer</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>AI Document Reviewer</h1>
+            <div class="controls">
+                <select id="reviewMode">
+                    <option value="pre_review">Pre-review (Pass/Fail)</option>
+                    <option value="detail_review" selected>Detail-review (Editing)</option>
+                </select>
+                <select id="modelSelect">
+                    <option value="llama3">Llama 3 (Local)</option>
+                    <option value="gemma4:31b">Gemma 4 31B (Local)</option>
+                    <option value="gemini-1.5-pro">Gemini 1.5 Pro (Cloud)</option>
+                    <option value="gemini-1.5-flash">Gemini 1.5 Flash (Cloud)</option>
+                    <option value="gemma-4-31b-it">Gemma 4 31B (Cloud)</option>
+                </select>
+                <input type="password" id="apiKey" placeholder="Google API Key (for Cloud models)">
+                <input type="file" id="fileInput" accept=".docx">
+                <button id="uploadBtn">Upload & Start</button>
+                <button id="exportBtn" disabled>Finish & Export</button>
+                <div id="aiStatus" class="status-hidden">
+                    <span class="pulse-dot"></span> 正在处理...
+                </div>
+            </div>
+        </header>
+        
+        <main>
+            <div id="docContainer" class="panel">
+                <div class="panel-header">Document Content</div>
+                <div id="docContent" class="content">
+                    <p class="placeholder">Upload a Word document to begin...</p>
+                </div>
+            </div>
+            
+            <div id="chatContainer" class="panel">
+                <div class="panel-header">AI Reviewer Chat</div>
+                <div id="chatMessages" class="content">
+                    <div class="message ai">Hello! Upload a document and I'll start reviewing it paragraph by paragraph. You can tell me to ignore or change specific suggestions here.</div>
+                </div>
+                <div class="chat-input">
+                    <input type="text" id="chatInput" placeholder="Type your instruction..." disabled>
+                    <button id="sendBtn" disabled>Send</button>
+                </div>
+            </div>
+        </main>
+    </div>
+    <script src="/static/app.js"></script>
+</body>
+</html>
