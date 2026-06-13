@@ -23,7 +23,7 @@
                     <option value="gemma-4-31b-it">Gemma 4 31B (Cloud)</option>
                 </select>
                 <input type="password" id="apiKey" placeholder="Google API Key (for Cloud models)">
-                <input type="file" id="fileInput" accept=".docx">
+                <input type="file" id="fileInput" accept=".docx,.doc,.pdf">
                 <button id="uploadBtn">Upload & Start</button>
                 <button id="exportBtn" disabled>Finish & Export</button>
                 <div id="aiStatus" class="status-hidden">
@@ -34,20 +34,28 @@
         
         <main>
             <div id="docContainer" class="panel">
-                <div class="panel-header">Document Content</div>
+                <div class="panel-header">文档内容</div>
                 <div id="docContent" class="content">
-                    <p class="placeholder">Upload a Word document to begin...</p>
+                    <p class="placeholder">上传 Word 文档开始审稿...</p>
                 </div>
             </div>
             
-            <div id="chatContainer" class="panel">
-                <div class="panel-header">AI Reviewer Chat</div>
-                <div id="chatMessages" class="content">
-                    <div class="message ai">Hello! Upload a document and I'll start reviewing it paragraph by paragraph. You can tell me to ignore or change specific suggestions here.</div>
+            <div id="sidePanel" class="side-panel">
+                <div id="suggestionsContainer" class="panel">
+                    <div class="panel-header">精审建议详情</div>
+                    <div id="suggestionsList" class="content">
+                        <p class="placeholder">AI 建议将按文档顺序在此实时列出...</p>
+                    </div>
                 </div>
-                <div class="chat-input">
-                    <input type="text" id="chatInput" placeholder="Type your instruction..." disabled>
-                    <button id="sendBtn" disabled>Send</button>
+
+                <div id="chatSection" class="chat-section">
+                    <div id="chatMessages" class="chat-messages">
+                        <div class="message ai">在此输入指令指导 AI（如：“接受 #1”）。</div>
+                    </div>
+                    <div class="chat-input">
+                        <input type="text" id="chatInput" placeholder="对话/指令..." disabled>
+                        <button id="sendBtn" disabled>发送</button>
+                    </div>
                 </div>
             </div>
         </main>

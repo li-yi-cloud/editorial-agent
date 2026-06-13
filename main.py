@@ -3,6 +3,10 @@ import shutil
 import uuid
 import json
 import asyncio
+import subprocess
+import traceback
+import re
+import pypandoc
 from typing import List, Dict, Any, Optional
 
 from fastapi import FastAPI, UploadFile, File, WebSocket, WebSocketDisconnect, HTTPException, Form
@@ -10,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, FileResponse
 from docx import Document
 from docx.shared import RGBColor
+from pypdf import PdfReader
 from langchain_ollama import ChatOllama
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
@@ -63,6 +68,52 @@ def get_llm(model_name: str, api_key: Optional[str] = None):
     else:
         return ChatOllama(model=model_name, temperature=0)
 
+def extract_text_from_docx_robust(path):
+    """Aggressively extract text from paragraphs and nested tables."""
+    try:
+        doc = Document(path)
+    except Exception as e:
+        print(f"python-docx failed to open {path}: {e}")
+        return []
+
+    paras = []
+    idx = 0
+
+    def add_para(text):
+        nonlocal idx
+        if text and text.strip():
+            paras.append({"text": text.strip(), "index": idx})
+            idx += 1
+
+    # 1. Standard paragraphs
+    for p in doc.paragraphs:
+        add_para(p.text)
+
+    # 2. Deep Table extraction
+    def process_table(table):
+        for row in table.rows:
+            for cell in row.cells:
+                for p in cell.paragraphs:
+                    add_para(p.text)
+                for nested_table in cell.tables:
+                    process_table(nested_table)
+
+    for table in doc.tables:
+        process_table(table)
+        
+    return paras
+
+def split_into_paragraphs(text):
+    """Splits raw text into paragraphs based on multiple newlines."""
+    # Split by 2 or more newlines
+    parts = re.split(r'\n\s*\n', text)
+    paras = []
+    for i, p in enumerate(parts):
+        content = p.strip()
+        if content:
+            paras.append({"text": content, "index": i})
+    return paras
+
 @app.get("/")
 async def get_index():
     if os.path.exists("static/index.html"):
@@ -72,30 +123,90 @@ async def get_index():
 
 @app.post("/upload")
 async def upload_file(file: UploadFile = File(...), client_id: str = Form(...)):
-    if not file.filename.endswith(".docx"):
-        raise HTTPException(status_code=400, detail="Only .docx files are supported")
-    
-    temp_path = f"temp_{uuid.uuid4()}.docx"
-    with open(temp_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-    
-    doc = Document(temp_path)
-    paragraphs = [{"text": p.text, "index": i} for i, p in enumerate(doc.paragraphs) if p.text.strip()]
-    
-    if client_id not in sessions:
-        sessions[client_id] = {
-            "paragraphs": [],
-            "suggestions": [],
-            "chat_history": [],
-            "temp_path": None,
-            "original_text": "",
-            "model_name": "llama3",
-            "api_key": None
-        }
-    
-    sessions[client_id]["temp_path"] = temp_path
-    
-    return {"paragraphs": paragraphs}
+    try:
+        allowed_exts = (".docx", ".doc", ".pdf")
+        ext = os.path.splitext(file.filename)[1].lower()
+        if ext not in allowed_exts:
+            raise HTTPException(status_code=400, detail=f"不支持的格式: {ext}")
+        
+        temp_id = str(uuid.uuid4())
+        temp_path = f"temp_{temp_id}{ext}"
+        with open(temp_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+        
+        paragraphs = []
+        final_temp_path = temp_path
+        
+        if ext == ".docx":
+            paragraphs = extract_text_from_docx_robust(temp_path)
+            print(f"DEBUG: Found {len(paragraphs)} segments in .docx")
+            
+        elif ext == ".doc":
+            docx_path = f"temp_{temp_id}.docx"
+            try:
+                # Primary attempt: pypandoc (industrial grade)
+                print(f"DEBUG: Attempting pypandoc conversion for {temp_path}")
+                pypandoc.convert_file(temp_path, 'docx', outputfile=docx_path)
+                paragraphs = extract_text_from_docx_robust(docx_path)
+                
+                # Secondary fallback: textutil
+                if not paragraphs:
+                    print("DEBUG: pypandoc empty, trying textutil")
+                    subprocess.run(["textutil", "-convert", "docx", "-output", docx_path, temp_path], 
+                                 capture_output=True, text=True, check=True)
+                    paragraphs = extract_text_from_docx_robust(docx_path)
+
+                # Final fallback: plain text extraction
+                if not paragraphs:
+                    print("DEBUG: docx conversion failed to yield text, falling back to TXT extraction")
+                    result = subprocess.run(["textutil", "-convert", "txt", "-stdout", temp_path], 
+                                         capture_output=True, text=True, check=True)
+                    paragraphs = split_into_paragraphs(result.stdout)
+                
+                if os.path.exists(temp_path): os.remove(temp_path)
+                final_temp_path = docx_path
+            except Exception as e:
+                print(f"Conversion/Parsing error for .doc: {str(e)}")
+                # Extreme fallback
+                result = subprocess.run(["textutil", "-stdout", "-convert", "txt", temp_path], capture_output=True, text=True)
+                paragraphs = split_into_paragraphs(result.stdout)
+                final_temp_path = None
+                
+        elif ext == ".pdf":
+            try:
+                reader = PdfReader(temp_path)
+                full_pdf_text = ""
+                for page in reader.pages:
+                    full_pdf_text += (page.extract_text() or "") + "\n\n"
+                paragraphs = split_into_paragraphs(full_pdf_text)
+                print(f"DEBUG: Found {len(paragraphs)} segments in .pdf")
+            except Exception as e:
+                print(f"PDF extraction error: {e}")
+        
+        if not paragraphs:
+            raise Exception("无法从文件中提取任何文字内容，请确认文件是否加密、已损坏或者是受保护的 PDF。")
+
+        if client_id not in sessions:
+            sessions[client_id] = {
+                "paragraphs": [],
+                "suggestions": [],
+                "chat_history": [],
+                "temp_path": None,
+                "original_text": "",
+                "model_name": "llama3",
+                "api_key": None
+            }
+        
+        sessions[client_id]["temp_path"] = final_temp_path
+        sessions[client_id]["paragraphs"] = paragraphs
+        sessions[client_id]["original_text"] = "\n\n".join([p["text"] for p in paragraphs])
+        
+        return {"paragraphs": paragraphs}
+
+    except Exception as e:
+        print(f"UPLOAD ERROR: {str(e)}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.websocket("/ws/{client_id}")
 async def websocket_endpoint(websocket: WebSocket, client_id: str):
@@ -118,11 +229,8 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
             message = json.loads(data)
             
             if message["type"] == "start_review":
-                sessions[client_id]["paragraphs"] = message["paragraphs"]
-                sessions[client_id]["original_text"] = "\n".join([p["text"] for p in message["paragraphs"]])
                 sessions[client_id]["model_name"] = message.get("model", "llama3")
                 sessions[client_id]["api_key"] = message.get("api_key")
-                
                 mode = message.get("mode", "detail_review")
                 asyncio.create_task(run_review_process(websocket, client_id, mode))
             
@@ -146,7 +254,7 @@ async def run_review_process(websocket: WebSocket, client_id: str, mode: str):
         try:
             llm = get_llm(model_name, api_key)
         except Exception as e:
-            await websocket.send_json({"type": "chat", "text": f"Error initializing model: {str(e)}"})
+            await websocket.send_json({"type": "chat", "text": f"错误：模型初始化失败: {str(e)}"})
             return
         
         if mode == "pre_review":
@@ -159,7 +267,7 @@ async def run_review_process(websocket: WebSocket, client_id: str, mode: str):
                 })
             except Exception as e:
                 print(f"Error in pre-review: {e}")
-                await websocket.send_json({"type": "chat", "text": f"Error during pre-review analysis: {str(e)}"})
+                await websocket.send_json({"type": "chat", "text": f"初审分析出错: {str(e)}"})
         else:
             chain = REVIEW_PROMPT | llm | parser
             for i, para in enumerate(paragraphs):
@@ -194,7 +302,7 @@ async def handle_chat_instruction(websocket: WebSocket, client_id: str, instruct
         try:
             llm = get_llm(model_name, api_key)
         except Exception as e:
-            await websocket.send_json({"type": "chat", "text": f"Error initializing model: {str(e)}"})
+            await websocket.send_json({"type": "chat", "text": f"错误：模型初始化失败: {str(e)}"})
             return
         
         context = {
@@ -211,7 +319,7 @@ async def handle_chat_instruction(websocket: WebSocket, client_id: str, instruct
                 "instruction": instruction
             })
             
-            reply = response.get("reply", "I've processed your instruction.")
+            reply = response.get("reply", "我已处理您的指令。")
             action = response.get("action")
             sug_id = response.get("id")
             
@@ -233,7 +341,7 @@ async def handle_chat_instruction(websocket: WebSocket, client_id: str, instruct
             
         except Exception as e:
             print(f"Error handling chat: {e}")
-            error_msg = f"Sorry, I had trouble processing that instruction: {str(e)}"
+            error_msg = f"抱歉，处理指令时出现问题: {str(e)}"
             await websocket.send_json({"type": "chat", "text": error_msg})
     finally:
         await websocket.send_json({"type": "status", "active": False})

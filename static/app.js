@@ -16,6 +16,7 @@ const sendBtn = document.getElementById('sendBtn');
 const modelSelect = document.getElementById('modelSelect');
 const reviewMode = document.getElementById('reviewMode');
 const apiKeyInput = document.getElementById('apiKey');
+const suggestionsList = document.getElementById('suggestionsList');
 
 // Load persisted settings
 window.onload = function() {
@@ -31,14 +32,15 @@ reviewMode.onchange = function() { localStorage.setItem('editorial_mode', review
 
 uploadBtn.onclick = async function() {
     const file = fileInput.files[0];
-    if (!file) return alert('Please select a file');
+    if (!file) return alert('请选择一个文件');
 
     const formData = new FormData();
     formData.append('file', file);
     formData.append('client_id', window.clientId);
 
     uploadBtn.disabled = true;
-    docContent.innerHTML = '<p class="placeholder">Uploading and parsing...</p>';
+    docContent.innerHTML = '<p class="placeholder">正在上传并解析文件...</p>';
+    suggestionsList.innerHTML = '<p class="placeholder">等待 AI 开始分析...</p>';
 
     try {
         const response = await fetch('/upload', {
@@ -46,6 +48,8 @@ uploadBtn.onclick = async function() {
             body: formData
         });
         const data = await response.json();
+        
+        if (response.status !== 200) throw new Error(data.detail || '上传失败');
         
         window.paragraphs = data.paragraphs;
         window.renderDocument();
@@ -55,16 +59,17 @@ uploadBtn.onclick = async function() {
         sendBtn.disabled = false;
         exportBtn.disabled = false;
     } catch (err) {
-        console.error(err);
-        alert('Upload failed');
+        alert('错误: ' + err.message);
         uploadBtn.disabled = false;
+        docContent.innerHTML = '<p class="placeholder">上传失败。</p>';
     }
 };
 
 window.renderDocument = function() {
     docContent.innerHTML = '';
+    suggestionsList.innerHTML = '<p class="placeholder">AI 建议将在此列出...</p>';
     window.paragraphs.forEach(function(p, i) {
-        p.suggestions = []; // Initialize suggestions array for tracking
+        p.suggestions = []; 
         const pElem = document.createElement('div');
         pElem.className = 'paragraph';
         pElem.id = 'para-' + i;
@@ -74,6 +79,7 @@ window.renderDocument = function() {
 };
 
 function setupWebSocket() {
+    if (ws) ws.close();
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     ws = new WebSocket(protocol + '//' + window.location.host + '/ws/' + window.clientId);
     
@@ -99,9 +105,9 @@ function setupWebSocket() {
     };
     
     ws.onopen = function() {
-        const mode = document.getElementById('reviewMode').value;
-        const model = document.getElementById('modelSelect').value;
-        const apiKey = document.getElementById('apiKey').value;
+        const mode = reviewMode.value;
+        const model = modelSelect.value;
+        const apiKey = apiKeyInput.value;
         ws.send(JSON.stringify({ 
             type: 'start_review', 
             paragraphs: window.paragraphs,
@@ -113,90 +119,101 @@ function setupWebSocket() {
 }
 
 window.handlePreReviewResult = function(data) {
-    const chatContainer = document.getElementById('chatMessages');
-    const resultDiv = document.createElement('div');
-    resultDiv.className = 'message ai pre-review-report ' + data.decision.toLowerCase();
+    // ROUTE TO SUGGESTIONS LIST (TOP PANEL), NOT CHAT
+    const list = document.getElementById('suggestionsList');
+    list.innerHTML = ''; // Clear placeholder
     
-    let html = '<strong>Pre-review Decision: ' + data.decision + '</strong><br><br>';
-    html += '<p>' + data.summary + '</p>';
+    const resultDiv = document.createElement('div');
+    resultDiv.className = 'pre-review-report ' + data.decision.toLowerCase();
+    
+    let html = '<div class="card-header">初审结论: ' + data.decision + '</div>';
+    html += '<div class="card-content">';
+    html += '<strong>总结报告:</strong><p>' + data.summary + '</p>';
     if (data.recommendations && data.recommendations.length > 0) {
-        html += '<ul>' + data.recommendations.map(function(r) { return '<li>' + r + '</li>'; }).join('') + '</ul>';
+        html += '<strong>核心改进建议:</strong><ul>' + data.recommendations.map(function(r) { return '<li>' + r + '</li>'; }).join('') + '</ul>';
     }
+    html += '</div>';
     
     resultDiv.innerHTML = html;
-    chatContainer.appendChild(resultDiv);
-    chatContainer.scrollTop = chatContainer.scrollHeight;
+    list.appendChild(resultDiv);
+    list.scrollTop = 0;
     
-    if (data.decision === 'Pass') {
-        window.addChatMessage("Content passed initial screening. You can now switch to 'Detail-review' mode for granular edits.", 'ai');
-    } else {
-        window.addChatMessage("Content does not meet publication standards. Please address the critical issues above.", 'ai');
-    }
+    window.addChatMessage("初审已完成，报告已在上方面板生成。", "ai");
 };
 
 window.handleSuggestion = function(data) {
-    const pElem = document.getElementById('para-' + data.para_index);
-    if (!pElem) return;
-    
     if (!window.paragraphs[data.para_index].suggestions) {
         window.paragraphs[data.para_index].suggestions = [];
     }
     window.paragraphs[data.para_index].suggestions.push(data);
     
-    // Update Document UI (markers only)
+    // 1. Update Document UI
     window.renderParagraphWithSuggestions(data.para_index);
     
-    // Add Suggestion Card to Chat Sidebar
-    addSuggestionCard(data);
+    // 2. Add to Suggestions List Panel (Top Panel)
+    addSuggestionToList(data);
 };
 
-function addSuggestionCard(sug) {
-    const chatMessages = document.getElementById('chatMessages');
+function addSuggestionToList(sug) {
+    const list = document.getElementById('suggestionsList');
+    const placeholder = list.querySelector('.placeholder');
+    if (placeholder) placeholder.remove();
+
     const card = document.createElement('div');
     
-    // Calculate global number
     let globalNum = 0;
     for (let i = 0; i <= sug.para_index; i++) {
         const parasugs = window.paragraphs[i].suggestions || [];
         if (i < sug.para_index) {
             globalNum += parasugs.length;
         } else {
-            globalNum += parasugs.indexOf(sug) + 1;
+            const idx = parasugs.indexOf(sug);
+            globalNum += (idx >= 0 ? idx + 1 : parasugs.length);
         }
     }
 
-    card.className = 'message ai suggestion-card';
+    card.className = 'suggestion-card';
     card.id = 'card-' + sug.id;
     card.innerHTML = 
-        '<div class="card-header">建议 #' + globalNum + '</div>' +
+        '<div class="card-header">精审建议 #' + globalNum + '</div>' +
         '<div class="card-content">' +
         '  <div class="orig-snippet">原文: <em>' + sug.target + '</em></div>' +
         '  <div class="sug-text">建议: <strong>' + sug.suggestion + '</strong></div>' +
         '  <div class="sug-comment">原因: ' + sug.comment + '</div>' +
         '</div>';
     
-    chatMessages.appendChild(card);
-    chatMessages.scrollTop = chatMessages.scrollHeight;
+    list.appendChild(card);
+    list.scrollTop = list.scrollHeight;
 }
 
 window.renderParagraphWithSuggestions = function(index) {
     const pElem = document.getElementById('para-' + index);
+    if (!pElem) return;
     const text = window.paragraphs[index].text;
     const sugs = window.paragraphs[index].suggestions || [];
     
+    let globalStartIdx = 0;
+    for (let i = 0; i < index; i++) {
+        globalStartIdx += (window.paragraphs[i].suggestions || []).length;
+    }
+
     const sorted = [...sugs].sort(function(a, b) { return b.start - a.start; });
     
     let html = text;
     sorted.forEach(function(s) {
+        const originalIdx = sugs.indexOf(s);
+        const displayNum = globalStartIdx + originalIdx + 1;
+
         const before = html.substring(0, s.start);
         const target = html.substring(s.start, s.end);
         const after = html.substring(s.end);
         
         const statusClass = s.status === 'rejected' ? 'rejected' : (s.status === 'accepted' ? 'accepted' : '');
         
-        html = before + '<span class="suggestion-wrapper ' + statusClass + '" data-id="' + s.id + '">' +
-               '<span class="original-text" title="Original">' + target + '</span>' +
-               '<span class="suggestion-text" title="Suggestion: ' + s.comment + '"> [AI: ' + s.suggestion + ']</span>' +
+        html = before + '<span class="suggestion-anchor ' + statusClass + '" data-id="' + s.id + '">' +
+               '<span class="original-text">' + target + '</span>' +
+               '<sup class="suggestion-num">[' + displayNum + ']</sup>' +
+               '<span class="suggestion-inline-sug">[' + s.suggestion + ']</span>' +
                '</span>' + after;
     });
     
@@ -242,4 +259,12 @@ window.updateParagraph = function(index, text, suggestions) {
     window.paragraphs[index].text = text;
     window.paragraphs[index].suggestions = suggestions;
     window.renderParagraphWithSuggestions(index);
+    
+    // Sync sidebar cards
+    suggestions.forEach(function(s) {
+        const card = document.getElementById('card-' + s.id);
+        if (card) {
+            card.className = 'suggestion-card ' + (s.status || '');
+        }
+    });
 };
