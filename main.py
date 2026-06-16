@@ -7,6 +7,7 @@ import subprocess
 import traceback
 import re
 import pypandoc
+from datetime import datetime
 from typing import List, Dict, Any, Optional
 
 from fastapi import FastAPI, UploadFile, File, WebSocket, WebSocketDisconnect, HTTPException, Form
@@ -19,9 +20,30 @@ from langchain_ollama import ChatOllama
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
+from langchain_community.tools import DuckDuckGoSearchRun
 import chromadb
 
 app = FastAPI()
+
+# Search Tool
+search_tool = DuckDuckGoSearchRun()
+
+from langchain_core.tools import tool
+
+# Search Tool as a structured tool for LLM
+@tool
+def search_internet(query: str) -> str:
+    """当文档中提到最新的（如2024-2026年）事实、数据、政策或需要核实具体的背景信息时，使用此工具搜索互联网。
+    输入应为一个简洁的搜索查询语句。"""
+    try:
+        # Run search in a thread to avoid blocking
+        return search_tool.run(f"{query} latest updates")
+    except Exception as e:
+        return f"搜索失败: {e}"
+
+async def get_web_context(text: str) -> str:
+    # This function is now legacy, we will use the agent approach
+    return ""
 
 # Mount static files
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -34,17 +56,20 @@ collection = chroma_client.get_or_create_collection(name="document_reviews")
 sessions: Dict[str, Dict[str, Any]] = {}
 
 PRE_REVIEW_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", "你是一位资深学术期刊主编及资深新闻采编总监。请严格按照以下【专家评审准则】评估文档是否达到发表标准：\n"
+    ("system", "当前日期是：{current_date}。\n"
+               "你是一位资深学术期刊主编及资深新闻采编总监。请严格按照以下【专家评审准则】评估文档是否达到发表标准：\n"
                "1. 【结构逻辑】：检查是否符合 IMRaD (引言、方法、结果、讨论) 规范；逻辑是否自洽；是否存在“Nut Graf”（核心意义段落）清晰解释研究/报道的价值。\n"
                "2. 【创新与贡献】：评估研究/内容是否具有独特性，是否提供了实质性的新知识或新视角。\n"
                "3. 【严谨性】：方法论是否可复现；数据/事实是否有可靠来源支撑；结论是否过度推导。\n"
                "4. 【合规性】：检查学术伦理、利益冲突声明及引用规范。\n"
+               "注意：如果提供了【互联网搜索背景信息】，请结合最新的实时信息（特别是 2025-2026 年的进展）来评估文档的时效性和准确性。\n"
                "必须使用中文回答。格式为 JSON 对象：{{'decision': 'Pass' 或 'Fail', 'summary': '深度专家分析报告...', 'recommendations': ['具体改进点1', '具体改进点2']}}。"),
     ("user", "{text}")
 ])
 
 REVIEW_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", "你是一位专业的稿件深度编辑。请应用以下【编辑实务规范】为段落提供修改建议：\n"
+    ("system", "当前日期是：{current_date}。\n"
+               "你是一位专业的稿件深度编辑。请应用以下【编辑实务规范】为段落提供修改建议：\n"
                "1. 【去冗增效】：剔除赘余词汇，修正“被动语态堆砌”，增强动词表现力，提升表达的简洁度。\n"
                "2. 【学术/专业调性】：确保语气客观严谨（学术类）或直接生动（新闻类）；消除口语化表达。\n"
                "3. 【逻辑转承】：优化句间衔接，确保论证链条环环相扣。\n"
@@ -55,7 +80,8 @@ REVIEW_PROMPT = ChatPromptTemplate.from_messages([
 ])
 
 INSTRUCTION_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", "你正在协助用户审阅文档。用户会就之前的建议或一般编辑规则给你指示。"
+    ("system", "当前日期是：{current_date}。\n"
+               "你正在协助用户审阅文档。用户会就之前的建议或一般编辑规则给你指示。"
                "上下文: {context}。"
                "用户指示: {instruction}。"
                "分析指示并决定是否拒绝、接受之前的建议，或者以不同的方式修改文本。"
@@ -251,8 +277,10 @@ async def run_review_process(websocket: WebSocket, client_id: str, mode: str):
     full_text = session["original_text"]
     model_name = session["model_name"]
     api_key = session["api_key"]
+    current_date = datetime.now().strftime("%Y年%m月%d日")
     
     parser = JsonOutputParser()
+    tools = [search_internet]
     
     try:
         try:
@@ -261,22 +289,60 @@ async def run_review_process(websocket: WebSocket, client_id: str, mode: str):
             await websocket.send_json({"type": "chat", "text": f"错误：模型初始化失败: {str(e)}"})
             return
         
+        # Bind tools to LLM
+        if hasattr(llm, "bind_tools"):
+            llm_with_tools = llm.bind_tools(tools)
+        else:
+            llm_with_tools = llm
+
         if mode == "pre_review":
-            chain = PRE_REVIEW_PROMPT | llm | parser
             try:
-                result = await chain.ainvoke({"text": full_text})
+                # Generalized autonomous decision for search
+                decision_msg = await llm_with_tools.ainvoke(
+                    f"当前日期是 {current_date}。分析以下文档内容。如果其中包含任何你由于训练数据截止日期而无法确认的最新事实、数据、政策或背景信息，请调用搜索工具进行核实。文档内容：\n\n{full_text}"
+                )
+                
+                if hasattr(decision_msg, "tool_calls") and decision_msg.tool_calls:
+                    await websocket.send_json({"type": "chat", "text": "AI 识别到需要联网核实的最新信息，正在执行搜索..."})
+                    for tool_call in decision_msg.tool_calls:
+                        tool_output = search_internet.invoke(tool_call["args"])
+                        full_text += f"\n\n[互联网搜索补充参考]:\n{tool_output}"
+                
+                chain = PRE_REVIEW_PROMPT | llm | parser
+                result = await chain.ainvoke({
+                    "text": full_text,
+                    "current_date": current_date
+                })
                 await websocket.send_json({
                     "type": "pre_review_result",
                     **result
                 })
             except Exception as e:
-                print(f"Error in pre-review: {e}")
+                print(f"Error in pre-review agent: {e}")
+                traceback.print_exc()
                 await websocket.send_json({"type": "chat", "text": f"初审分析出错: {str(e)}"})
         else:
+            # Detailed review
             chain = REVIEW_PROMPT | llm | parser
             for i, para in enumerate(paragraphs):
                 try:
-                    result = await chain.ainvoke({"text": para["text"]})
+                    input_text = para["text"]
+                    
+                    # LLM decides whether to search for each paragraph if it contains unknown recent info
+                    search_decision = await llm_with_tools.ainvoke(
+                        f"当前日期是 {current_date}。阅读段落。如果包含你无法确认的最新信息，请调用搜索工具。段落内容：\n\n{input_text}"
+                    )
+                    
+                    if hasattr(search_decision, "tool_calls") and search_decision.tool_calls:
+                        await websocket.send_json({"type": "chat", "text": f"正在联网核实第 {i+1} 段中的相关时效性信息..."})
+                        for tool_call in search_decision.tool_calls:
+                            tool_output = search_internet.invoke(tool_call["args"])
+                            input_text += f"\n\n[实时搜索参考]:\n{tool_output}"
+
+                    result = await chain.ainvoke({
+                        "text": input_text,
+                        "current_date": current_date
+                    })
                     if isinstance(result, list):
                         for sug in result:
                             sug_id = str(uuid.uuid4())
@@ -301,6 +367,7 @@ async def handle_chat_instruction(websocket: WebSocket, client_id: str, instruct
     
     model_name = session["model_name"]
     api_key = session["api_key"]
+    current_date = datetime.now().strftime("%Y年%m月%d日")
     
     try:
         try:
@@ -320,7 +387,8 @@ async def handle_chat_instruction(websocket: WebSocket, client_id: str, instruct
         try:
             response = await chain.ainvoke({
                 "context": json.dumps(context),
-                "instruction": instruction
+                "instruction": instruction,
+                "current_date": current_date
             })
             
             reply = response.get("reply", "我已处理您的指令。")
